@@ -1,0 +1,5 @@
+{
+  "name": "Video Translator & SRT Generator",
+  "description": "Translate video speech and generate English SRT subtitles using Gemini AI.",
+  "requestFramePermissions": []
+}
