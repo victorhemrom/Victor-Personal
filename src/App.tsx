@@ -4,10 +4,11 @@
  */
 
 import React, { useState, useRef } from 'react';
-import { Upload, FileVideo, FileAudio, Languages, Download, Loader2, AlertCircle, CheckCircle2, Copy, Check, FileText, Film } from 'lucide-react';
+import { Upload, FileVideo, FileAudio, Languages, Download, Loader2, AlertCircle, CheckCircle2, Copy, Check, FileText, Film, FileArchive } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateSRT, ProcessMode } from './services/gemini';
-import { muxSubtitles } from './services/ffmpeg';
+import { encodeVideoWithSubtitles } from './services/mediaEncoder';
+import JSZip from 'jszip';
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
@@ -19,6 +20,7 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [isMuxing, setIsMuxing] = useState(false);
   const [muxProgress, setMuxProgress] = useState(0);
+  const [muxStatus, setMuxStatus] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -113,10 +115,18 @@ export default function App() {
     
     setIsMuxing(true);
     setMuxProgress(0);
+    setMuxStatus('Starting...');
     try {
-      const { url, ext } = await muxSubtitles(file, srtContent, (progress) => {
-        setMuxProgress(Math.round(progress * 100));
-      });
+      const { url, ext } = await encodeVideoWithSubtitles(
+        file, 
+        srtContent, 
+        (progress) => {
+          setMuxProgress(Math.round(progress * 100));
+        },
+        (status) => {
+          setMuxStatus(status);
+        }
+      );
       
       const a = document.createElement('a');
       a.href = url;
@@ -131,6 +141,37 @@ export default function App() {
     } finally {
       setIsMuxing(false);
       setMuxProgress(0);
+      setMuxStatus(null);
+    }
+  };
+
+  const downloadZip = async () => {
+    if (!file || !srtContent) return;
+    
+    try {
+      const zip = new JSZip();
+      
+      // Add the original video
+      zip.file(file.name, file);
+      
+      // Add the SRT file
+      const baseName = file.name.split('.')[0];
+      zip.file(`${baseName}.srt`, srtContent);
+      
+      // Generate the zip
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(blob);
+      
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${baseName}_with_subtitles.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to create ZIP:', err);
+      setError('Failed to create ZIP file.');
     }
   };
 
@@ -341,14 +382,26 @@ export default function App() {
                         {isMuxing ? (
                           <>
                             <Loader2 className="w-4 h-4 animate-spin" />
-                            <span>Embedding ({muxProgress}%)...</span>
+                            <span className="flex flex-col items-start">
+                              <span>{muxStatus || 'Encoding...'}</span>
+                              {muxProgress > 0 && <span className="text-xs opacity-75">{muxProgress}% (Real-time)</span>}
+                            </span>
                           </>
                         ) : (
                           <>
                             <Film className="w-4 h-4" />
-                            <span>Download Video</span>
+                            <span>Encode Video (Slower)</span>
                           </>
                         )}
+                      </button>
+                    )}
+                    {file?.type.startsWith('video/') && (
+                      <button 
+                        onClick={downloadZip}
+                        className="flex items-center space-x-2 text-indigo-600 hover:text-indigo-700 font-medium text-sm transition-colors"
+                      >
+                        <FileArchive className="w-4 h-4" />
+                        <span>Download ZIP</span>
                       </button>
                     )}
                     <button 
