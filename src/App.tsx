@@ -114,20 +114,20 @@ export default function App() {
     setIsMuxing(true);
     setMuxProgress(0);
     try {
-      const url = await muxSubtitles(file, srtContent, (progress) => {
+      const { url, ext } = await muxSubtitles(file, srtContent, (progress) => {
         setMuxProgress(Math.round(progress * 100));
       });
       
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${file.name.split('.')[0]}_subtitled.mp4`;
+      a.download = `${file.name.split('.')[0]}_subtitled${ext}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to mux subtitles:', err);
-      setError('Failed to embed subtitles into the video. The file format might not be supported.');
+      setError(`Failed to embed subtitles: ${err.message || 'Unknown error'}. Please check the console for details.`);
     } finally {
       setIsMuxing(false);
       setMuxProgress(0);

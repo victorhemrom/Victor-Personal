@@ -7,9 +7,14 @@ export const muxSubtitles = async (
   videoFile: File, 
   srtContent: string,
   onProgress?: (progress: number) => void
-): Promise<string> => {
+): Promise<{url: string, ext: string}> => {
   if (!ffmpeg) {
     ffmpeg = new FFmpeg();
+    
+    ffmpeg.on('log', ({ message }) => {
+      console.log('[FFmpeg]', message);
+    });
+
     ffmpeg.on('progress', ({ progress }) => {
       if (onProgress) onProgress(progress);
     });
@@ -21,22 +26,53 @@ export const muxSubtitles = async (
     });
   }
 
-  const videoName = 'input' + videoFile.name.substring(videoFile.name.lastIndexOf('.'));
-  const outputName = 'output.mp4';
+  const extIndex = videoFile.name.lastIndexOf('.');
+  const inputExt = extIndex !== -1 ? videoFile.name.substring(extIndex) : '.mp4';
+  const videoName = 'input' + inputExt;
 
   await ffmpeg.writeFile(videoName, await fetchFile(videoFile));
   await ffmpeg.writeFile('subs.srt', srtContent);
 
-  // Multiplexing subtitles into mp4 container (soft subtitles)
-  await ffmpeg.exec(['-i', videoName, '-i', 'subs.srt', '-c', 'copy', '-c:s', 'mov_text', outputName]);
+  let outputName = 'output.mp4';
+  let outExt = '.mp4';
+  let mimeType = 'video/mp4';
+
+  // Try MP4 first
+  let ret = await ffmpeg.exec([
+    '-i', videoName, 
+    '-i', 'subs.srt', 
+    '-c:v', 'copy', 
+    '-c:a', 'copy', 
+    '-c:s', 'mov_text', 
+    outputName
+  ]);
+
+  if (ret !== 0) {
+    console.warn('MP4 muxing failed, falling back to MKV...');
+    outputName = 'output.mkv';
+    outExt = '.mkv';
+    mimeType = 'video/x-matroska';
+    ret = await ffmpeg.exec([
+      '-i', videoName, 
+      '-i', 'subs.srt', 
+      '-c:v', 'copy', 
+      '-c:a', 'copy', 
+      '-c:s', 'srt', 
+      outputName
+    ]);
+  }
+
+  if (ret !== 0) {
+    throw new Error(`FFmpeg process failed with exit code ${ret}`);
+  }
 
   const data = await ffmpeg.readFile(outputName);
-  const blob = new Blob([data], { type: 'video/mp4' });
+  const blob = new Blob([data], { type: mimeType });
   
   // Clean up
   await ffmpeg.deleteFile(videoName);
   await ffmpeg.deleteFile('subs.srt');
   await ffmpeg.deleteFile(outputName);
   
-  return URL.createObjectURL(blob);
+  return { url: URL.createObjectURL(blob), ext: outExt };
 };
