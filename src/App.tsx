@@ -4,9 +4,10 @@
  */
 
 import React, { useState, useRef } from 'react';
-import { Upload, FileVideo, FileAudio, Languages, Download, Loader2, AlertCircle, CheckCircle2, Copy, Check, FileText } from 'lucide-react';
+import { Upload, FileVideo, FileAudio, Languages, Download, Loader2, AlertCircle, CheckCircle2, Copy, Check, FileText, Film } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateSRT, ProcessMode } from './services/gemini';
+import { muxSubtitles } from './services/ffmpeg';
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
@@ -14,7 +15,10 @@ export default function App() {
   const [srtContent, setSrtContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [mediaPreview, setMediaPreview] = useState<string | null>(null);
+  const [vttUrl, setVttUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [isMuxing, setIsMuxing] = useState(false);
+  const [muxProgress, setMuxProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -27,6 +31,10 @@ export default function App() {
       setFile(selectedFile);
       setMediaPreview(URL.createObjectURL(selectedFile));
       setSrtContent(null);
+      if (vttUrl) {
+        URL.revokeObjectURL(vttUrl);
+        setVttUrl(null);
+      }
       setError(null);
       setCopied(false);
     }
@@ -51,18 +59,31 @@ export default function App() {
     });
   };
 
+  const srtToVtt = (srt: string) => {
+    let vtt = 'WEBVTT\n\n';
+    vtt += srt.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+    return vtt;
+  };
+
   const processMedia = async (mode: ProcessMode) => {
     if (!file) return;
 
     setProcessingMode(mode);
     setError(null);
     setSrtContent(null);
+    if (vttUrl) {
+      URL.revokeObjectURL(vttUrl);
+      setVttUrl(null);
+    }
 
     try {
       const base64 = await fileToBase64(file);
       const result = await generateSRT(base64, file.type, mode);
       if (result) {
         setSrtContent(result);
+        const vttContent = srtToVtt(result);
+        const blob = new Blob([vttContent], { type: 'text/vtt' });
+        setVttUrl(URL.createObjectURL(blob));
       } else {
         throw new Error("Failed to generate SRT content.");
       }
@@ -85,6 +106,32 @@ export default function App() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  const downloadVideoWithSubs = async () => {
+    if (!file || !srtContent || !file.type.startsWith('video/')) return;
+    
+    setIsMuxing(true);
+    setMuxProgress(0);
+    try {
+      const url = await muxSubtitles(file, srtContent, (progress) => {
+        setMuxProgress(Math.round(progress * 100));
+      });
+      
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${file.name.split('.')[0]}_subtitled.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to mux subtitles:', err);
+      setError('Failed to embed subtitles into the video. The file format might not be supported.');
+    } finally {
+      setIsMuxing(false);
+      setMuxProgress(0);
+    }
   };
 
   return (
@@ -160,6 +207,10 @@ export default function App() {
                     setFile(null);
                     setMediaPreview(null);
                     setSrtContent(null);
+                    if (vttUrl) {
+                      URL.revokeObjectURL(vttUrl);
+                      setVttUrl(null);
+                    }
                   }}
                   className="text-sm text-zinc-500 hover:text-red-500 font-medium"
                 >
@@ -180,7 +231,17 @@ export default function App() {
                       src={mediaPreview} 
                       controls 
                       className="w-full h-full object-contain"
-                    />
+                    >
+                      {vttUrl && (
+                        <track 
+                          src={vttUrl} 
+                          kind="subtitles" 
+                          srcLang="en" 
+                          label="Subtitles" 
+                          default 
+                        />
+                      )}
+                    </video>
                   )}
                 </div>
               )}
@@ -263,7 +324,7 @@ export default function App() {
                     <CheckCircle2 className="w-5 h-5" />
                     <span className="font-semibold">SRT Generated Successfully</span>
                   </div>
-                  <div className="flex items-center space-x-4">
+                  <div className="flex flex-col sm:flex-row items-center gap-4">
                     <button 
                       onClick={copyToClipboard}
                       className="flex items-center space-x-2 text-zinc-600 hover:text-zinc-900 font-medium text-sm transition-colors"
@@ -271,6 +332,25 @@ export default function App() {
                       {copied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
                       <span>{copied ? 'Copied!' : 'Copy'}</span>
                     </button>
+                    {file?.type.startsWith('video/') && (
+                      <button 
+                        onClick={downloadVideoWithSubs}
+                        disabled={isMuxing}
+                        className="flex items-center space-x-2 text-indigo-600 hover:text-indigo-700 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {isMuxing ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>Embedding ({muxProgress}%)...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Film className="w-4 h-4" />
+                            <span>Download Video</span>
+                          </>
+                        )}
+                      </button>
+                    )}
                     <button 
                       onClick={downloadSRT}
                       className="flex items-center space-x-2 text-indigo-600 hover:text-indigo-700 font-medium text-sm transition-colors"
