@@ -4,13 +4,16 @@
  */
 
 import React, { useState, useRef } from 'react';
-import { Upload, FileVideo, FileAudio, Languages, Download, Loader2, AlertCircle, CheckCircle2, Copy, Check, FileText, Film, FileArchive } from 'lucide-react';
+import { Upload, FileVideo, FileAudio, Languages, Download, Loader2, AlertCircle, CheckCircle2, Copy, Check, FileText, Film, FileArchive, Mic } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { generateSRT, ProcessMode } from './services/gemini';
+import { generateSRT, detectMediaLanguage, ProcessMode, MediaLanguageDetectionResult } from './services/gemini';
 import { encodeVideoWithSubtitles } from './services/mediaEncoder';
+import { LiveTranscribe } from './components/LiveTranscribe';
+import { MediaLanguageDisplay } from './components/MediaLanguageDisplay';
 import JSZip from 'jszip';
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<'upload' | 'live'>('upload');
   const [file, setFile] = useState<File | null>(null);
   const [processingMode, setProcessingMode] = useState<ProcessMode | null>(null);
   const [srtContent, setSrtContent] = useState<string | null>(null);
@@ -21,24 +24,71 @@ export default function App() {
   const [isMuxing, setIsMuxing] = useState(false);
   const [muxProgress, setMuxProgress] = useState(0);
   const [muxStatus, setMuxStatus] = useState<string | null>(null);
+  const [isDetectingLang, setIsDetectingLang] = useState(false);
+  const [detectedMediaLang, setDetectedMediaLang] = useState<MediaLanguageDetectionResult | null>(null);
+  const [langDetectionError, setLangDetectionError] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const runLanguageDetection = async (selectedFile: File) => {
+    setIsDetectingLang(true);
+    setLangDetectionError(null);
+    setDetectedMediaLang(null);
+    try {
+      const base64 = await fileToBase64(selectedFile);
+      const result = await detectMediaLanguage(base64, selectedFile.type);
+      setDetectedMediaLang(result);
+    } catch (err: any) {
+      console.warn("Language detection error:", err);
+      setLangDetectionError(err.message || "Failed to detect spoken language");
+    } finally {
+      setIsDetectingLang(false);
+    }
+  };
+
+  const processUploadedFile = (selectedFile: File) => {
+    if (selectedFile.size > 20 * 1024 * 1024) { // 20MB limit
+      setError("File size too large. Please use a file under 20MB.");
+      return;
+    }
+    setFile(selectedFile);
+    setMediaPreview(URL.createObjectURL(selectedFile));
+    setSrtContent(null);
+    if (vttUrl) {
+      URL.revokeObjectURL(vttUrl);
+      setVttUrl(null);
+    }
+    setError(null);
+    setCopied(false);
+    runLanguageDetection(selectedFile);
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     if (selectedFile) {
-      if (selectedFile.size > 20 * 1024 * 1024) { // 20MB limit for demo
-        setError("File size too large. Please use a file under 20MB.");
-        return;
-      }
-      setFile(selectedFile);
-      setMediaPreview(URL.createObjectURL(selectedFile));
-      setSrtContent(null);
-      if (vttUrl) {
-        URL.revokeObjectURL(vttUrl);
-        setVttUrl(null);
-      }
-      setError(null);
-      setCopied(false);
+      processUploadedFile(selectedFile);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    const droppedFile = e.dataTransfer.files?.[0];
+    if (droppedFile) {
+      processUploadedFile(droppedFile);
     }
   };
 
@@ -180,249 +230,315 @@ export default function App() {
       <motion.div 
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="max-w-3xl w-full space-y-8"
+        className="max-w-4xl w-full space-y-8"
       >
         <div className="text-center">
           <div className="inline-flex items-center justify-center p-3 bg-indigo-100 rounded-2xl mb-4">
             <Languages className="w-8 h-8 text-indigo-600" />
           </div>
           <h1 className="text-4xl font-bold tracking-tight text-zinc-900 sm:text-5xl">
-            Media Translator
+            TranSubs
           </h1>
           <p className="mt-4 text-lg text-zinc-600">
-            Upload a video or audio file to transcribe original speech or translate it to English SRT.
+            Upload media or transcribe live audio from any language with automatic language detection.
           </p>
         </div>
 
-        <div className="bg-white p-8 rounded-3xl shadow-sm border border-zinc-200">
-          <div className="mb-8 p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100 flex items-start space-x-3">
-            <AlertCircle className="w-5 h-5 text-indigo-500 shrink-0 mt-0.5" />
-            <div className="text-sm text-indigo-900">
-              <p className="font-semibold">How to use with Google Drive links:</p>
-              <ol className="list-decimal ml-4 mt-1 space-y-1">
-                <li>Download the media from your Google Drive link.</li>
-                <li>Upload the file below (max 20MB).</li>
-                <li>Choose to Transcribe (original language) or Translate to English.</li>
-              </ol>
-            </div>
-          </div>
-
-          {!file ? (
-            <div 
-              onClick={() => fileInputRef.current?.click()}
-              className="border-2 border-dashed border-zinc-300 rounded-2xl p-12 text-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/30 transition-all group"
+        {/* Navigation Tabs */}
+        <div className="flex justify-center">
+          <div className="bg-zinc-200/80 p-1.5 rounded-2xl flex items-center space-x-1.5 shadow-inner">
+            <button
+              onClick={() => setActiveTab('upload')}
+              className={`flex items-center space-x-2 px-5 py-2.5 rounded-xl font-semibold text-sm transition-all cursor-pointer ${
+                activeTab === 'upload'
+                  ? 'bg-white text-zinc-900 shadow-sm'
+                  : 'text-zinc-600 hover:text-zinc-900'
+              }`}
             >
-              <input 
-                type="file" 
-                ref={fileInputRef}
-                onChange={handleFileChange}
-                accept="video/*,audio/*"
-                className="hidden"
-              />
-              <Upload className="w-12 h-12 text-zinc-400 mx-auto mb-4 group-hover:text-indigo-500 transition-colors" />
-              <p className="text-zinc-600 font-medium">Click to upload or drag and drop</p>
-              <p className="text-zinc-400 text-sm mt-1">MP4, MOV, AVI, MP3, WAV (max 20MB)</p>
-            </div>
-          ) : (
-            <div className="space-y-6">
-              <div className="flex items-center justify-between bg-zinc-50 p-4 rounded-xl border border-zinc-100">
-                <div className="flex items-center space-x-3">
-                  <div className="p-2 bg-indigo-100 rounded-lg">
-                    {file.type.startsWith('audio/') ? (
-                      <FileAudio className="w-6 h-6 text-indigo-600" />
-                    ) : (
-                      <FileVideo className="w-6 h-6 text-indigo-600" />
-                    )}
-                  </div>
-                  <div>
-                    <p className="text-sm font-medium text-zinc-900 truncate max-w-[200px] sm:max-w-md">
-                      {file.name}
-                    </p>
-                    <p className="text-xs text-zinc-500">
-                      {(file.size / (1024 * 1024)).toFixed(2)} MB
-                    </p>
-                  </div>
-                </div>
-                <button 
-                  onClick={() => {
-                    setFile(null);
-                    setMediaPreview(null);
-                    setSrtContent(null);
-                    if (vttUrl) {
-                      URL.revokeObjectURL(vttUrl);
-                      setVttUrl(null);
-                    }
-                  }}
-                  className="text-sm text-zinc-500 hover:text-red-500 font-medium"
-                >
-                  Remove
-                </button>
-              </div>
-
-              {mediaPreview && (
-                <div className={`rounded-xl overflow-hidden bg-black border border-zinc-200 shadow-inner flex items-center justify-center ${file.type.startsWith('audio/') ? 'p-8' : 'aspect-video'}`}>
-                  {file.type.startsWith('audio/') ? (
-                    <audio 
-                      src={mediaPreview} 
-                      controls 
-                      className="w-full"
-                    />
-                  ) : (
-                    <video 
-                      src={mediaPreview} 
-                      controls 
-                      className="w-full h-full object-contain"
-                    >
-                      {vttUrl && (
-                        <track 
-                          src={vttUrl} 
-                          kind="subtitles" 
-                          srcLang="en" 
-                          label="Subtitles" 
-                          default 
-                        />
-                      )}
-                    </video>
-                  )}
-                </div>
-              )}
-
-              <div className="flex flex-col sm:flex-row justify-center gap-4">
-                <button
-                  onClick={() => processMedia('translate')}
-                  disabled={processingMode !== null}
-                  className={`
-                    flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-semibold transition-all
-                    ${processingMode === 'translate' 
-                      ? 'bg-indigo-400 text-white cursor-not-allowed shadow-lg shadow-indigo-200' 
-                      : processingMode !== null
-                        ? 'bg-zinc-100 text-zinc-400 cursor-not-allowed'
-                        : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-200 active:scale-95'}
-                  `}
-                >
-                  {processingMode === 'translate' ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      <span>Translating...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Languages className="w-5 h-5" />
-                      <span>Translate to English</span>
-                    </>
-                  )}
-                </button>
-
-                <button
-                  onClick={() => processMedia('transcribe')}
-                  disabled={processingMode !== null}
-                  className={`
-                    flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-semibold transition-all
-                    ${processingMode === 'transcribe' 
-                      ? 'bg-zinc-400 text-white cursor-not-allowed shadow-lg shadow-zinc-200' 
-                      : processingMode !== null
-                        ? 'bg-zinc-100 text-zinc-400 cursor-not-allowed'
-                        : 'bg-zinc-800 text-white hover:bg-zinc-900 shadow-lg shadow-zinc-200 active:scale-95'}
-                  `}
-                >
-                  {processingMode === 'transcribe' ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      <span>Transcribing...</span>
-                    </>
-                  ) : (
-                    <>
-                      <FileText className="w-5 h-5" />
-                      <span>Transcribe Original</span>
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          )}
-
-          <AnimatePresence>
-            {error && (
-              <motion.div 
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                exit={{ opacity: 0, height: 0 }}
-                className="mt-6 p-4 bg-red-50 border border-red-100 rounded-xl flex items-start space-x-3"
-              >
-                <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
-                <p className="text-sm text-red-700">{error}</p>
-              </motion.div>
-            )}
-
-            {srtContent && (
-              <motion.div 
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="mt-8 space-y-4"
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2 text-emerald-600">
-                    <CheckCircle2 className="w-5 h-5" />
-                    <span className="font-semibold">SRT Generated Successfully</span>
-                  </div>
-                  <div className="flex flex-col sm:flex-row items-center gap-4">
-                    <button 
-                      onClick={copyToClipboard}
-                      className="flex items-center space-x-2 text-zinc-600 hover:text-zinc-900 font-medium text-sm transition-colors"
-                    >
-                      {copied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
-                      <span>{copied ? 'Copied!' : 'Copy'}</span>
-                    </button>
-                    {file?.type.startsWith('video/') && (
-                      <button 
-                        onClick={downloadVideoWithSubs}
-                        disabled={isMuxing}
-                        className="flex items-center space-x-2 text-indigo-600 hover:text-indigo-700 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {isMuxing ? (
-                          <>
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                            <span className="flex flex-col items-start">
-                              <span>{muxStatus || 'Encoding...'}</span>
-                              {muxProgress > 0 && <span className="text-xs opacity-75">{muxProgress}% (Real-time)</span>}
-                            </span>
-                          </>
-                        ) : (
-                          <>
-                            <Film className="w-4 h-4" />
-                            <span>Encode Video (Slower)</span>
-                          </>
-                        )}
-                      </button>
-                    )}
-                    {file?.type.startsWith('video/') && (
-                      <button 
-                        onClick={downloadZip}
-                        className="flex items-center space-x-2 text-indigo-600 hover:text-indigo-700 font-medium text-sm transition-colors"
-                      >
-                        <FileArchive className="w-4 h-4" />
-                        <span>Download ZIP</span>
-                      </button>
-                    )}
-                    <button 
-                      onClick={downloadSRT}
-                      className="flex items-center space-x-2 text-indigo-600 hover:text-indigo-700 font-medium text-sm transition-colors"
-                    >
-                      <Download className="w-4 h-4" />
-                      <span>Download .srt</span>
-                    </button>
-                  </div>
-                </div>
-                <div className="srt-container max-h-[400px]">
-                  <pre className="whitespace-pre-wrap">{srtContent}</pre>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+              <Upload className="w-4 h-4 text-indigo-600" />
+              <span>Upload Media</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('live')}
+              className={`flex items-center space-x-2 px-5 py-2.5 rounded-xl font-semibold text-sm transition-all cursor-pointer relative ${
+                activeTab === 'live'
+                  ? 'bg-white text-zinc-900 shadow-sm'
+                  : 'text-zinc-600 hover:text-zinc-900'
+              }`}
+            >
+              <Mic className="w-4 h-4 text-indigo-600" />
+              <span>Live Audio Transcribe</span>
+              <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-bold rounded-full uppercase tracking-wider">
+                Live
+              </span>
+            </button>
+          </div>
         </div>
 
+        {activeTab === 'live' ? (
+          <LiveTranscribe />
+        ) : (
+          <div className="bg-white p-8 rounded-3xl shadow-sm border border-zinc-200">
+            <div className="mb-8 p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100 flex items-start space-x-3">
+              <AlertCircle className="w-5 h-5 text-indigo-500 shrink-0 mt-0.5" />
+              <div className="text-sm text-indigo-900">
+                <p className="font-semibold">How to use with Google Drive links:</p>
+                <ol className="list-decimal ml-4 mt-1 space-y-1">
+                  <li>Download the media from your Google Drive link.</li>
+                  <li>Upload the file below (max 20MB).</li>
+                  <li>Choose to Transcribe (original language) or Translate to English.</li>
+                </ol>
+              </div>
+            </div>
+
+            {!file ? (
+              <div 
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                className={`border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all group ${
+                  isDragging
+                    ? 'border-indigo-500 bg-indigo-50/50 scale-[1.01]'
+                    : 'border-zinc-300 hover:border-indigo-400 hover:bg-indigo-50/30'
+                }`}
+              >
+                <input 
+                  type="file" 
+                  ref={fileInputRef}
+                  onChange={handleFileChange}
+                  accept="video/*,audio/*"
+                  className="hidden"
+                />
+                <Upload className={`w-12 h-12 mx-auto mb-4 transition-colors ${isDragging ? 'text-indigo-600' : 'text-zinc-400 group-hover:text-indigo-500'}`} />
+                <p className="text-zinc-700 font-medium">
+                  {isDragging ? 'Drop your media file here' : 'Click to upload or drag and drop'}
+                </p>
+                <p className="text-zinc-400 text-sm mt-1">MP4, MOV, AVI, MP3, WAV (max 20MB)</p>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between bg-zinc-50 p-4 rounded-xl border border-zinc-100">
+                  <div className="flex items-center space-x-3">
+                    <div className="p-2 bg-indigo-100 rounded-lg">
+                      {file.type.startsWith('audio/') ? (
+                        <FileAudio className="w-6 h-6 text-indigo-600" />
+                      ) : (
+                        <FileVideo className="w-6 h-6 text-indigo-600" />
+                      )}
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-zinc-900 truncate max-w-[200px] sm:max-w-md">
+                        {file.name}
+                      </p>
+                      <p className="text-xs text-zinc-500">
+                        {(file.size / (1024 * 1024)).toFixed(2)} MB
+                      </p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      setFile(null);
+                      setMediaPreview(null);
+                      setSrtContent(null);
+                      setDetectedMediaLang(null);
+                      setIsDetectingLang(false);
+                      setLangDetectionError(null);
+                      if (vttUrl) {
+                        URL.revokeObjectURL(vttUrl);
+                        setVttUrl(null);
+                      }
+                    }}
+                    className="text-sm text-zinc-500 hover:text-red-500 font-medium cursor-pointer"
+                  >
+                    Remove
+                  </button>
+                </div>
+
+                {mediaPreview && (
+                  <div className={`rounded-xl overflow-hidden bg-black border border-zinc-200 shadow-inner flex items-center justify-center ${file.type.startsWith('audio/') ? 'p-8' : 'aspect-video'}`}>
+                    {file.type.startsWith('audio/') ? (
+                      <audio 
+                        src={mediaPreview} 
+                        controls 
+                        className="w-full"
+                      />
+                    ) : (
+                      <video 
+                        src={mediaPreview} 
+                        controls 
+                        className="w-full h-full object-contain"
+                      >
+                        {vttUrl && (
+                          <track 
+                            src={vttUrl} 
+                            kind="subtitles" 
+                            srcLang="en" 
+                            label="Subtitles" 
+                            default 
+                          />
+                        )}
+                      </video>
+                    )}
+                  </div>
+                )}
+
+                {/* Display element showing detected language of uploaded media file before user starts process */}
+                <MediaLanguageDisplay
+                  isDetecting={isDetectingLang}
+                  detection={detectedMediaLang}
+                  error={langDetectionError}
+                  onRetry={() => {
+                    if (file) runLanguageDetection(file);
+                  }}
+                  disabled={processingMode !== null}
+                />
+
+                <div className="flex flex-col sm:flex-row justify-center gap-4">
+                  <button
+                    onClick={() => processMedia('translate')}
+                    disabled={processingMode !== null}
+                    className={`
+                      flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-semibold transition-all cursor-pointer
+                      ${processingMode === 'translate' 
+                        ? 'bg-indigo-400 text-white cursor-not-allowed shadow-lg shadow-indigo-200' 
+                        : processingMode !== null
+                          ? 'bg-zinc-100 text-zinc-400 cursor-not-allowed'
+                          : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-200 active:scale-95'}
+                    `}
+                  >
+                    {processingMode === 'translate' ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                        <span>Translating...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Languages className="w-5 h-5" />
+                        <span>
+                          {detectedMediaLang?.detectedLanguage && detectedMediaLang.detectedLanguage.code.toLowerCase() !== 'en'
+                            ? `Translate ${detectedMediaLang.detectedLanguage.name} → English`
+                            : 'Translate to English'}
+                        </span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={() => processMedia('transcribe')}
+                    disabled={processingMode !== null}
+                    className={`
+                      flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-semibold transition-all cursor-pointer
+                      ${processingMode === 'transcribe' 
+                        ? 'bg-zinc-400 text-white cursor-not-allowed shadow-lg shadow-zinc-200' 
+                        : processingMode !== null
+                          ? 'bg-zinc-100 text-zinc-400 cursor-not-allowed'
+                          : 'bg-zinc-800 text-white hover:bg-zinc-900 shadow-lg shadow-zinc-200 active:scale-95'}
+                    `}
+                  >
+                    {processingMode === 'transcribe' ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                        <span>Transcribing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <FileText className="w-5 h-5" />
+                        <span>
+                          {detectedMediaLang?.detectedLanguage
+                            ? `Transcribe Original (${detectedMediaLang.detectedLanguage.name})`
+                            : 'Transcribe Original'}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <AnimatePresence>
+              {error && (
+                <motion.div 
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="mt-6 p-4 bg-red-50 border border-red-100 rounded-xl flex items-start space-x-3"
+                >
+                  <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+                  <p className="text-sm text-red-700">{error}</p>
+                </motion.div>
+              )}
+
+              {srtContent && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mt-8 space-y-4"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2 text-emerald-600">
+                      <CheckCircle2 className="w-5 h-5" />
+                      <span className="font-semibold">SRT Generated Successfully</span>
+                    </div>
+                    <div className="flex flex-col sm:flex-row items-center gap-4">
+                      <button 
+                        onClick={copyToClipboard}
+                        className="flex items-center space-x-2 text-zinc-600 hover:text-zinc-900 font-medium text-sm transition-colors"
+                      >
+                        {copied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+                        <span>{copied ? 'Copied!' : 'Copy'}</span>
+                      </button>
+                      {file?.type.startsWith('video/') && (
+                        <button 
+                          onClick={downloadVideoWithSubs}
+                          disabled={isMuxing}
+                          className="flex items-center space-x-2 text-indigo-600 hover:text-indigo-700 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isMuxing ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              <span className="flex flex-col items-start">
+                                <span>{muxStatus || 'Encoding...'}</span>
+                                {muxProgress > 0 && <span className="text-xs opacity-75">{muxProgress}% (Real-time)</span>}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <Film className="w-4 h-4" />
+                              <span>Encode Video (Slower)</span>
+                            </>
+                          )}
+                        </button>
+                      )}
+                      {file?.type.startsWith('video/') && (
+                        <button 
+                          onClick={downloadZip}
+                          className="flex items-center space-x-2 text-indigo-600 hover:text-indigo-700 font-medium text-sm transition-colors"
+                        >
+                          <FileArchive className="w-4 h-4" />
+                          <span>Download ZIP</span>
+                        </button>
+                      )}
+                      <button 
+                        onClick={downloadSRT}
+                        className="flex items-center space-x-2 text-indigo-600 hover:text-indigo-700 font-medium text-sm transition-colors"
+                      >
+                        <Download className="w-4 h-4" />
+                        <span>Download .srt</span>
+                      </button>
+                    </div>
+                  </div>
+                  <div className="srt-container max-h-[400px]">
+                    <pre className="whitespace-pre-wrap">{srtContent}</pre>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
+
         <div className="text-center text-zinc-400 text-sm">
-          <p>Powered by Gemini 3 Flash • Accurate Timestamps • Multi-language Support</p>
+          <p>Powered by Gemini AI • Multilingual Speech Recognition • Accurate Timestamps</p>
         </div>
       </motion.div>
     </div>
