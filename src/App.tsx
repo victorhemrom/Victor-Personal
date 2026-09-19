@@ -4,12 +4,11 @@
  */
 
 import React, { useState, useRef } from 'react';
-import { Upload, FileVideo, FileAudio, Languages, Download, Loader2, AlertCircle, CheckCircle2, Copy, Check, FileText, Film, FileArchive, Mic } from 'lucide-react';
+import { Upload, FileVideo, FileAudio, Languages, Download, Loader2, AlertCircle, CheckCircle2, Copy, Check, FileText, Film, FileArchive, Mic, Users, FileJson, Sparkles } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { generateSRT, detectMediaLanguage, ProcessMode, MediaLanguageDetectionResult } from './services/gemini';
+import { generateSRT, ProcessMode, DiarizedSegment } from './services/gemini';
 import { encodeVideoWithSubtitles } from './services/mediaEncoder';
 import { LiveTranscribe } from './components/LiveTranscribe';
-import { MediaLanguageDisplay } from './components/MediaLanguageDisplay';
 import JSZip from 'jszip';
 
 export default function App() {
@@ -17,6 +16,8 @@ export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [processingMode, setProcessingMode] = useState<ProcessMode | null>(null);
   const [srtContent, setSrtContent] = useState<string | null>(null);
+  const [diarization, setDiarization] = useState<DiarizedSegment[]>([]);
+  const [resultTab, setResultTab] = useState<'diarization' | 'srt' | 'json'>('diarization');
   const [error, setError] = useState<string | null>(null);
   const [mediaPreview, setMediaPreview] = useState<string | null>(null);
   const [vttUrl, setVttUrl] = useState<string | null>(null);
@@ -24,27 +25,8 @@ export default function App() {
   const [isMuxing, setIsMuxing] = useState(false);
   const [muxProgress, setMuxProgress] = useState(0);
   const [muxStatus, setMuxStatus] = useState<string | null>(null);
-  const [isDetectingLang, setIsDetectingLang] = useState(false);
-  const [detectedMediaLang, setDetectedMediaLang] = useState<MediaLanguageDetectionResult | null>(null);
-  const [langDetectionError, setLangDetectionError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const runLanguageDetection = async (selectedFile: File) => {
-    setIsDetectingLang(true);
-    setLangDetectionError(null);
-    setDetectedMediaLang(null);
-    try {
-      const base64 = await fileToBase64(selectedFile);
-      const result = await detectMediaLanguage(base64, selectedFile.type);
-      setDetectedMediaLang(result);
-    } catch (err: any) {
-      console.warn("Language detection error:", err);
-      setLangDetectionError(err.message || "Failed to detect spoken language");
-    } finally {
-      setIsDetectingLang(false);
-    }
-  };
 
   const processUploadedFile = (selectedFile: File) => {
     if (selectedFile.size > 20 * 1024 * 1024) { // 20MB limit
@@ -54,13 +36,13 @@ export default function App() {
     setFile(selectedFile);
     setMediaPreview(URL.createObjectURL(selectedFile));
     setSrtContent(null);
+    setDiarization([]);
     if (vttUrl) {
       URL.revokeObjectURL(vttUrl);
       setVttUrl(null);
     }
     setError(null);
     setCopied(false);
-    runLanguageDetection(selectedFile);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -92,13 +74,6 @@ export default function App() {
     }
   };
 
-  const copyToClipboard = () => {
-    if (!srtContent) return;
-    navigator.clipboard.writeText(srtContent);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
   const fileToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -123,6 +98,7 @@ export default function App() {
     setProcessingMode(mode);
     setError(null);
     setSrtContent(null);
+    setDiarization([]);
     if (vttUrl) {
       URL.revokeObjectURL(vttUrl);
       setVttUrl(null);
@@ -131,13 +107,14 @@ export default function App() {
     try {
       const base64 = await fileToBase64(file);
       const result = await generateSRT(base64, file.type, mode);
-      if (result) {
-        setSrtContent(result);
-        const vttContent = srtToVtt(result);
+      if (result && (result.srt || result.diarization?.length)) {
+        setSrtContent(result.srt);
+        setDiarization(result.diarization || []);
+        const vttContent = srtToVtt(result.srt);
         const blob = new Blob([vttContent], { type: 'text/vtt' });
         setVttUrl(URL.createObjectURL(blob));
       } else {
-        throw new Error("Failed to generate SRT content.");
+        throw new Error("Failed to generate speaker diarization and subtitles.");
       }
     } catch (err: any) {
       console.error(err);
@@ -145,6 +122,10 @@ export default function App() {
     } finally {
       setProcessingMode(null);
     }
+  };
+
+  const getDiarizationJsonString = () => {
+    return JSON.stringify(diarization, null, 2);
   };
 
   const downloadSRT = () => {
@@ -158,6 +139,86 @@ export default function App() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  const downloadJSON = () => {
+    if (!diarization || diarization.length === 0) return;
+    const jsonStr = getDiarizationJsonString();
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${file?.name.split('.')[0] || 'subtitles'}_diarization.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const copyToClipboard = () => {
+    let textToCopy = '';
+    if (resultTab === 'json') {
+      textToCopy = getDiarizationJsonString();
+    } else if (resultTab === 'srt') {
+      textToCopy = srtContent || '';
+    } else {
+      textToCopy = diarization
+        .map((seg) => `[${seg.start} --> ${seg.end}] ${seg.speaker ? `[${seg.speaker}]: ` : ''}${seg.text}`)
+        .join('\n\n');
+    }
+    navigator.clipboard.writeText(textToCopy);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const getSpeakerStyle = (speakerName: string) => {
+    const s = (speakerName || '').toLowerCase();
+    if (s.includes('1') || s.endsWith('a')) {
+      return {
+        badge: 'bg-indigo-600 text-white',
+        border: 'border-indigo-200 bg-indigo-50/40',
+        text: 'text-indigo-950',
+        avatarBg: 'bg-indigo-100 text-indigo-700',
+      };
+    }
+    if (s.includes('2') || s.endsWith('b')) {
+      return {
+        badge: 'bg-emerald-600 text-white',
+        border: 'border-emerald-200 bg-emerald-50/40',
+        text: 'text-emerald-950',
+        avatarBg: 'bg-emerald-100 text-emerald-700',
+      };
+    }
+    if (s.includes('3') || s.endsWith('c')) {
+      return {
+        badge: 'bg-amber-600 text-white',
+        border: 'border-amber-200 bg-amber-50/40',
+        text: 'text-amber-950',
+        avatarBg: 'bg-amber-100 text-amber-700',
+      };
+    }
+    if (s.includes('4') || s.endsWith('d')) {
+      return {
+        badge: 'bg-rose-600 text-white',
+        border: 'border-rose-200 bg-rose-50/40',
+        text: 'text-rose-950',
+        avatarBg: 'bg-rose-100 text-rose-700',
+      };
+    }
+    if (s.includes('5') || s.endsWith('e')) {
+      return {
+        badge: 'bg-purple-600 text-white',
+        border: 'border-purple-200 bg-purple-50/40',
+        text: 'text-purple-950',
+        avatarBg: 'bg-purple-100 text-purple-700',
+      };
+    }
+    return {
+      badge: 'bg-cyan-600 text-white',
+      border: 'border-cyan-200 bg-cyan-50/40',
+      text: 'text-cyan-950',
+      avatarBg: 'bg-cyan-100 text-cyan-700',
+    };
   };
 
   const downloadVideoWithSubs = async () => {
@@ -201,13 +262,18 @@ export default function App() {
     try {
       const zip = new JSZip();
       
-      // Add the original video
+      // Add the original media file
       zip.file(file.name, file);
       
       // Add the SRT file
       const baseName = file.name.split('.')[0];
       zip.file(`${baseName}.srt`, srtContent);
       
+      // Add the Diarization JSON file
+      if (diarization && diarization.length > 0) {
+        zip.file(`${baseName}_diarization.json`, getDiarizationJsonString());
+      }
+
       // Generate the zip
       const blob = await zip.generateAsync({ type: 'blob' });
       const url = URL.createObjectURL(blob);
@@ -341,9 +407,6 @@ export default function App() {
                       setFile(null);
                       setMediaPreview(null);
                       setSrtContent(null);
-                      setDetectedMediaLang(null);
-                      setIsDetectingLang(false);
-                      setLangDetectionError(null);
                       if (vttUrl) {
                         URL.revokeObjectURL(vttUrl);
                         setVttUrl(null);
@@ -383,17 +446,6 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Display element showing detected language of uploaded media file before user starts process */}
-                <MediaLanguageDisplay
-                  isDetecting={isDetectingLang}
-                  detection={detectedMediaLang}
-                  error={langDetectionError}
-                  onRetry={() => {
-                    if (file) runLanguageDetection(file);
-                  }}
-                  disabled={processingMode !== null}
-                />
-
                 <div className="flex flex-col sm:flex-row justify-center gap-4">
                   <button
                     onClick={() => processMedia('translate')}
@@ -415,11 +467,7 @@ export default function App() {
                     ) : (
                       <>
                         <Languages className="w-5 h-5" />
-                        <span>
-                          {detectedMediaLang?.detectedLanguage && detectedMediaLang.detectedLanguage.code.toLowerCase() !== 'en'
-                            ? `Translate ${detectedMediaLang.detectedLanguage.name} → English`
-                            : 'Translate to English'}
-                        </span>
+                        <span>Translate to English</span>
                       </>
                     )}
                   </button>
@@ -444,11 +492,7 @@ export default function App() {
                     ) : (
                       <>
                         <FileText className="w-5 h-5" />
-                        <span>
-                          {detectedMediaLang?.detectedLanguage
-                            ? `Transcribe Original (${detectedMediaLang.detectedLanguage.name})`
-                            : 'Transcribe Original'}
-                        </span>
+                        <span>Transcribe Original</span>
                       </>
                     )}
                   </button>
@@ -469,68 +513,182 @@ export default function App() {
                 </motion.div>
               )}
 
-              {srtContent && (
+              {(srtContent || diarization.length > 0) && (
                 <motion.div 
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className="mt-8 space-y-4"
+                  className="mt-8 space-y-5"
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-2 text-emerald-600">
-                      <CheckCircle2 className="w-5 h-5" />
-                      <span className="font-semibold">SRT Generated Successfully</span>
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-2 border-b border-zinc-100">
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <div className="flex items-center space-x-2 text-emerald-600">
+                        <CheckCircle2 className="w-5 h-5" />
+                        <span className="font-semibold text-zinc-900">Transcription & Diarization Complete</span>
+                      </div>
+                      {diarization.length > 0 && (
+                        <div className="flex items-center space-x-2">
+                          <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-800">
+                            {Array.from(new Set(diarization.map(d => d.speaker).filter(Boolean))).length || 1} Distinct Speakers
+                          </span>
+                          <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-zinc-100 text-zinc-700">
+                            {diarization.length} Dialogue Turns
+                          </span>
+                        </div>
+                      )}
                     </div>
-                    <div className="flex flex-col sm:flex-row items-center gap-4">
+
+                    <div className="flex flex-wrap items-center gap-3">
                       <button 
                         onClick={copyToClipboard}
-                        className="flex items-center space-x-2 text-zinc-600 hover:text-zinc-900 font-medium text-sm transition-colors"
+                        className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-100 font-medium text-xs transition-colors cursor-pointer"
+                        title="Copy current tab view to clipboard"
                       >
-                        {copied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+                        {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                         <span>{copied ? 'Copied!' : 'Copy'}</span>
                       </button>
+
+                      {diarization.length > 0 && (
+                        <button 
+                          onClick={downloadJSON}
+                          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 font-medium text-xs transition-colors cursor-pointer"
+                          title="Download strict JSON array with speaker diarization"
+                        >
+                          <FileJson className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Diarization JSON</span>
+                        </button>
+                      )}
+
+                      <button 
+                        onClick={downloadSRT}
+                        className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 font-medium text-xs transition-colors cursor-pointer"
+                        title="Download standard SubRip .SRT subtitle file"
+                      >
+                        <Download className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>Download .srt</span>
+                      </button>
+
                       {file?.type.startsWith('video/') && (
                         <button 
                           onClick={downloadVideoWithSubs}
                           disabled={isMuxing}
-                          className="flex items-center space-x-2 text-indigo-600 hover:text-indigo-700 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 text-white hover:bg-zinc-900 font-medium text-xs transition-colors disabled:opacity-50 cursor-pointer"
                         >
                           {isMuxing ? (
                             <>
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                              <span className="flex flex-col items-start">
-                                <span>{muxStatus || 'Encoding...'}</span>
-                                {muxProgress > 0 && <span className="text-xs opacity-75">{muxProgress}% (Real-time)</span>}
-                              </span>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              <span>{muxStatus || 'Encoding...'}</span>
                             </>
                           ) : (
                             <>
-                              <Film className="w-4 h-4" />
-                              <span>Encode Video (Slower)</span>
+                              <Film className="w-3.5 h-3.5" />
+                              <span>Burn Video Subs</span>
                             </>
                           )}
                         </button>
                       )}
+
                       {file?.type.startsWith('video/') && (
                         <button 
                           onClick={downloadZip}
-                          className="flex items-center space-x-2 text-indigo-600 hover:text-indigo-700 font-medium text-sm transition-colors"
+                          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-100 font-medium text-xs transition-colors cursor-pointer"
                         >
-                          <FileArchive className="w-4 h-4" />
-                          <span>Download ZIP</span>
+                          <FileArchive className="w-3.5 h-3.5" />
+                          <span>ZIP</span>
                         </button>
                       )}
-                      <button 
-                        onClick={downloadSRT}
-                        className="flex items-center space-x-2 text-indigo-600 hover:text-indigo-700 font-medium text-sm transition-colors"
-                      >
-                        <Download className="w-4 h-4" />
-                        <span>Download .srt</span>
-                      </button>
                     </div>
                   </div>
-                  <div className="srt-container max-h-[400px]">
-                    <pre className="whitespace-pre-wrap">{srtContent}</pre>
+
+                  {/* Format Navigation Tabs */}
+                  <div className="flex items-center space-x-2 border-b border-zinc-200">
+                    {diarization.length > 0 && (
+                      <button
+                        onClick={() => setResultTab('diarization')}
+                        className={`flex items-center space-x-2 px-4 py-2.5 font-semibold text-xs transition-colors border-b-2 cursor-pointer ${
+                          resultTab === 'diarization'
+                            ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50 rounded-t-lg'
+                            : 'border-transparent text-zinc-500 hover:text-zinc-800'
+                        }`}
+                      >
+                        <Users className="w-4 h-4" />
+                        <span>Speaker Timeline</span>
+                      </button>
+                    )}
+
+                    <button
+                      onClick={() => setResultTab('srt')}
+                      className={`flex items-center space-x-2 px-4 py-2.5 font-semibold text-xs transition-colors border-b-2 cursor-pointer ${
+                        resultTab === 'srt'
+                          ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50 rounded-t-lg'
+                          : 'border-transparent text-zinc-500 hover:text-zinc-800'
+                      }`}
+                    >
+                      <FileText className="w-4 h-4" />
+                      <span>SubRip (.SRT)</span>
+                    </button>
+
+                    {diarization.length > 0 && (
+                      <button
+                        onClick={() => setResultTab('json')}
+                        className={`flex items-center space-x-2 px-4 py-2.5 font-semibold text-xs transition-colors border-b-2 cursor-pointer ${
+                          resultTab === 'json'
+                            ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50 rounded-t-lg'
+                            : 'border-transparent text-zinc-500 hover:text-zinc-800'
+                        }`}
+                      >
+                        <FileJson className="w-4 h-4" />
+                        <span>JSON Array (Strict Structure)</span>
+                      </button>
+                    )}
                   </div>
+
+                  {/* Tab 1: Speaker Diarization Timeline */}
+                  {resultTab === 'diarization' && diarization.length > 0 && (
+                    <div className="space-y-3 max-h-[460px] overflow-y-auto pr-1">
+                      {diarization.map((seg, idx) => {
+                        const style = getSpeakerStyle(seg.speaker);
+                        return (
+                          <div 
+                            key={idx}
+                            className={`p-4 rounded-2xl border transition-all hover:shadow-xs ${style.border}`}
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                              <div className="flex items-center space-x-2">
+                                <span className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-[11px] ${style.avatarBg}`}>
+                                  {seg.speaker ? seg.speaker.replace(/speaker\s*/i, 'S').slice(0, 3) : 'S'}
+                                </span>
+                                <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${style.badge}`}>
+                                  {seg.speaker || 'Speaker'}
+                                </span>
+                              </div>
+                              <span className="font-mono text-xs text-zinc-500 bg-white/80 px-2 py-0.5 rounded-md border border-zinc-200">
+                                {seg.start} ➔ {seg.end}
+                              </span>
+                            </div>
+                            <p className={`text-sm leading-relaxed pl-8 ${style.text}`}>
+                              {seg.text}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Tab 2: SRT Subtitle Text */}
+                  {resultTab === 'srt' && (
+                    <div className="srt-container max-h-[460px]">
+                      <pre className="whitespace-pre-wrap font-mono text-xs text-zinc-800">{srtContent}</pre>
+                    </div>
+                  )}
+
+                  {/* Tab 3: Strict JSON Array */}
+                  {resultTab === 'json' && diarization.length > 0 && (
+                    <div className="relative">
+                      <div className="srt-container max-h-[460px] bg-zinc-950 text-zinc-200 p-4 rounded-2xl border border-zinc-800 font-mono text-xs overflow-auto">
+                        <pre>{getDiarizationJsonString()}</pre>
+                      </div>
+                    </div>
+                  )}
                 </motion.div>
               )}
             </AnimatePresence>

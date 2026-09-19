@@ -1,6 +1,6 @@
 {
   "name": "Video Translator & SRT Generator",
-  "description": "Translate video speech, generate English SRT subtitles, and transcribe live audio from any language with real-time language detection.",
+  "description": "Advanced audio transcription and speaker diarization engine with synchronized subtitles, speaker separation, SRT generation, and video subtitle burning.",
   "requestFramePermissions": ["microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -1,5 +1,17 @@
 export type ProcessMode = 'translate' | 'transcribe';
 
+export interface DiarizedSegment {
+  speaker: string;
+  start: string;
+  end: string;
+  text: string;
+}
+
+export interface GenerateSrtResult {
+  srt: string;
+  diarization: DiarizedSegment[];
+}
+
 export interface DetectedLanguage {
   name: string;
   code: string;
@@ -15,39 +27,7 @@ export interface LiveTranscriptionResult {
   confidence: 'high' | 'medium' | 'low';
 }
 
-export interface MediaLanguageDetectionResult {
-  hasSpeech: boolean;
-  detectedLanguage: DetectedLanguage | null;
-  confidence: 'high' | 'medium' | 'low';
-  snippet?: string;
-  snippetTranslation?: string;
-  summary?: string;
-}
-
-export async function detectMediaLanguage(
-  fileBase64: string,
-  mimeType: string
-): Promise<MediaLanguageDetectionResult> {
-  const response = await fetch('/api/detect-media-language', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      fileBase64,
-      mimeType,
-    }),
-  });
-
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({ error: 'Language detection failed' }));
-    throw new Error(errData.error || `Language detection error (${response.status})`);
-  }
-
-  return response.json();
-}
-
-export async function generateSRT(fileBase64: string, mimeType: string, mode: ProcessMode = 'translate'): Promise<string> {
+export async function generateSRT(fileBase64: string, mimeType: string, mode: ProcessMode = 'translate'): Promise<GenerateSrtResult> {
   const response = await fetch('/api/generate-srt', {
     method: 'POST',
     headers: {
@@ -66,7 +46,31 @@ export async function generateSRT(fileBase64: string, mimeType: string, mode: Pr
   }
 
   const data = await response.json();
-  return data.srt;
+  return {
+    srt: data.srt || '',
+    diarization: Array.isArray(data.diarization) ? data.diarization : [],
+  };
+}
+
+export async function diarizeMedia(fileBase64: string, mimeType: string, mode: ProcessMode = 'transcribe'): Promise<DiarizedSegment[]> {
+  const response = await fetch('/api/diarize', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      fileBase64,
+      mimeType,
+      mode,
+    }),
+  });
+
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({ error: 'Diarization failed' }));
+    throw new Error(errData.error || `Speaker diarization error (${response.status})`);
+  }
+
+  return response.json();
 }
 
 export async function transcribeLiveAudio(
