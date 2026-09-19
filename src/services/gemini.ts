@@ -1,100 +1,41 @@
+import { GoogleGenAI } from "@google/genai";
+
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+
 export type ProcessMode = 'translate' | 'transcribe';
 
-export interface DiarizedSegment {
-  speaker: string;
-  start: string;
-  end: string;
-  text: string;
-}
+export async function generateSRT(fileBase64: string, mimeType: string, mode: ProcessMode = 'translate') {
+  const model = "gemini-3-flash-preview";
+  
+  const prompt = mode === 'translate' 
+    ? `
+    Analyze this media (audio or video). 
+    1. Transcribe the speech.
+    2. Translate it into English if it's in another language.
+    3. Output the result strictly in SRT (SubRip Subtitle) format.
+    4. Ensure the timestamps are accurate and synchronized with the media.
+    5. Do not include any other text or explanation, only the SRT content.
+  `
+    : `
+    Analyze this media (audio or video). 
+    1. Transcribe the speech in its original language.
+    2. Do NOT translate the speech. Keep it in the original language spoken in the media.
+    3. Output the result strictly in SRT (SubRip Subtitle) format.
+    4. Ensure the timestamps are accurate and synchronized with the media.
+    5. Do not include any other text or explanation, only the SRT content.
+  `;
 
-export interface GenerateSrtResult {
-  srt: string;
-  diarization: DiarizedSegment[];
-}
-
-export interface DetectedLanguage {
-  name: string;
-  code: string;
-  nativeName: string;
-  flagEmoji: string;
-}
-
-export interface LiveTranscriptionResult {
-  hasSpeech: boolean;
-  detectedLanguage: DetectedLanguage | null;
-  transcript: string;
-  translation: string;
-  confidence: 'high' | 'medium' | 'low';
-}
-
-export async function generateSRT(fileBase64: string, mimeType: string, mode: ProcessMode = 'translate'): Promise<GenerateSrtResult> {
-  const response = await fetch('/api/generate-srt', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
+  const mediaPart = {
+    inlineData: {
+      data: fileBase64,
+      mimeType: mimeType,
     },
-    body: JSON.stringify({
-      fileBase64,
-      mimeType,
-      mode,
-    }),
-  });
-
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({ error: 'Request failed' }));
-    throw new Error(errData.error || `Failed to generate SRT (${response.status})`);
-  }
-
-  const data = await response.json();
-  return {
-    srt: data.srt || '',
-    diarization: Array.isArray(data.diarization) ? data.diarization : [],
   };
-}
 
-export async function diarizeMedia(fileBase64: string, mimeType: string, mode: ProcessMode = 'transcribe'): Promise<DiarizedSegment[]> {
-  const response = await fetch('/api/diarize', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      fileBase64,
-      mimeType,
-      mode,
-    }),
+  const response = await ai.models.generateContent({
+    model: model,
+    contents: { parts: [mediaPart, { text: prompt }] },
   });
 
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({ error: 'Diarization failed' }));
-    throw new Error(errData.error || `Speaker diarization error (${response.status})`);
-  }
-
-  return response.json();
+  return response.text;
 }
-
-export async function transcribeLiveAudio(
-  audioBase64: string,
-  mimeType: string = 'audio/webm',
-  translateToEnglish: boolean = true
-): Promise<LiveTranscriptionResult> {
-  const response = await fetch('/api/transcribe-live', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      audioBase64,
-      mimeType,
-      translateToEnglish,
-    }),
-  });
-
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({ error: 'Live transcription failed' }));
-    throw new Error(errData.error || `Server error during transcription (${response.status})`);
-  }
-
-  return response.json();
-}
-

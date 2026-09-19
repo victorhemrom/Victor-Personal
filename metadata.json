@@ -1,6 +1,5 @@
 {
   "name": "Video Translator & SRT Generator",
-  "description": "Advanced audio transcription and speaker diarization engine with synchronized subtitles, speaker separation, SRT generation, and video subtitle burning.",
-  "requestFramePermissions": ["microphone"],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "description": "Translate video speech and generate English SRT subtitles using Gemini AI.",
+  "requestFramePermissions": []
 }

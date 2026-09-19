@@ -3,31 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Video Translator & SRT Generator</title>
-    <meta name="description" content="Advanced audio transcription and speaker diarization engine with synchronized subtitles, speaker separation, SRT generation, and video subtitle burning." />
-    <meta property="og:title" content="Video Translator & SRT Generator" />
-    <meta property="og:description" content="Advanced audio transcription and speaker diarization engine with synchronized subtitles, speaker separation, SRT generation, and video subtitle burning." />
-    <script>
-      // Defensive shim: Ensure window.fetch has both getter and setter so environments or extensions reassigning window.fetch won't throw TypeError
-      (function() {
-        try {
-          const originalFetch = window.fetch ? window.fetch.bind(window) : null;
-          let activeFetch = originalFetch;
-          Object.defineProperty(window, 'fetch', {
-            get() {
-              return activeFetch;
-            },
-            set(newFetch) {
-              if (typeof newFetch === 'function') {
-                activeFetch = newFetch;
-              }
-            },
-            configurable: true,
-            enumerable: true
-          });
-        } catch (_) {}
-      })();
-    </script>
+    <title>My Google AI Studio App</title>
   </head>
   <body>
     <div id="root"></div>
