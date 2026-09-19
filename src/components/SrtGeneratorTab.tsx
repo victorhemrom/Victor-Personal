@@ -1,0 +1,423 @@
+import React, { useState, useRef } from 'react';
+import { 
+  Upload, 
+  FileVideo, 
+  FileAudio, 
+  Languages, 
+  Download, 
+  Loader2, 
+  AlertCircle, 
+  CheckCircle2, 
+  Copy, 
+  Check, 
+  FileText, 
+  Film, 
+  FileArchive 
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { generateSRT, ProcessMode } from '../services/gemini';
+import { encodeVideoWithSubtitles } from '../services/mediaEncoder';
+import JSZip from 'jszip';
+
+interface SrtGeneratorTabProps {
+  sharedFile: File | null;
+  onSharedFileChange: (file: File | null) => void;
+}
+
+export function SrtGeneratorTab({ sharedFile, onSharedFileChange }: SrtGeneratorTabProps) {
+  const [file, setFile] = useState<File | null>(sharedFile);
+  const [processingMode, setProcessingMode] = useState<ProcessMode | null>(null);
+  const [srtContent, setSrtContent] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [mediaPreview, setMediaPreview] = useState<string | null>(() => sharedFile ? URL.createObjectURL(sharedFile) : null);
+  const [vttUrl, setVttUrl] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [isMuxing, setIsMuxing] = useState(false);
+  const [muxProgress, setMuxProgress] = useState(0);
+  const [muxStatus, setMuxStatus] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Sync when shared file updates from parent
+  React.useEffect(() => {
+    if (sharedFile && sharedFile !== file) {
+      setFile(sharedFile);
+      setMediaPreview(URL.createObjectURL(sharedFile));
+    }
+  }, [sharedFile]);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0];
+    if (selectedFile) {
+      if (selectedFile.size > 20 * 1024 * 1024) {
+        setError("File size too large. Please use a file under 20MB.");
+        return;
+      }
+      setFile(selectedFile);
+      onSharedFileChange(selectedFile);
+      setMediaPreview(URL.createObjectURL(selectedFile));
+      setSrtContent(null);
+      if (vttUrl) {
+        URL.revokeObjectURL(vttUrl);
+        setVttUrl(null);
+      }
+      setError(null);
+      setCopied(false);
+    }
+  };
+
+  const copyToClipboard = () => {
+    if (!srtContent) return;
+    navigator.clipboard.writeText(srtContent);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const fileToBase64 = (f: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(f);
+      reader.onload = () => {
+        const base64 = (reader.result as string).split(',')[1];
+        resolve(base64);
+      };
+      reader.onerror = (err) => reject(err);
+    });
+  };
+
+  const srtToVtt = (srt: string) => {
+    let vtt = 'WEBVTT\n\n';
+    vtt += srt.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+    return vtt;
+  };
+
+  const processMedia = async (mode: ProcessMode) => {
+    if (!file) return;
+
+    setProcessingMode(mode);
+    setError(null);
+    setSrtContent(null);
+    if (vttUrl) {
+      URL.revokeObjectURL(vttUrl);
+      setVttUrl(null);
+    }
+
+    try {
+      const base64 = await fileToBase64(file);
+      const mimeType = file.type || (file.name.endsWith('.mp3') ? 'audio/mp3' : file.name.endsWith('.wav') ? 'audio/wav' : 'video/mp4');
+      const result = await generateSRT(base64, mimeType, mode);
+      if (result) {
+        setSrtContent(result);
+        const vttContent = srtToVtt(result);
+        const blob = new Blob([vttContent], { type: 'text/vtt' });
+        setVttUrl(URL.createObjectURL(blob));
+      } else {
+        throw new Error("Failed to generate SRT content.");
+      }
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || "An error occurred while processing the file.");
+    } finally {
+      setProcessingMode(null);
+    }
+  };
+
+  const downloadSRT = () => {
+    if (!srtContent) return;
+    const blob = new Blob([srtContent], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${file?.name.split('.')[0] || 'subtitles'}.srt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadVideoWithSubs = async () => {
+    if (!file || !srtContent || !file.type.startsWith('video/')) return;
+    
+    setIsMuxing(true);
+    setMuxProgress(0);
+    setMuxStatus('Starting...');
+    try {
+      const { url, ext } = await encodeVideoWithSubtitles(
+        file, 
+        srtContent, 
+        (progress) => {
+          setMuxProgress(Math.round(progress * 100));
+        },
+        (status) => {
+          setMuxStatus(status);
+        }
+      );
+      
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${file.name.split('.')[0]}_subtitled${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      console.error('Failed to mux subtitles:', err);
+      setError(`Failed to embed subtitles: ${err.message || 'Unknown error'}. Please check the console for details.`);
+    } finally {
+      setIsMuxing(false);
+      setMuxProgress(0);
+      setMuxStatus(null);
+    }
+  };
+
+  const downloadZip = async () => {
+    if (!file || !srtContent) return;
+    
+    try {
+      const zip = new JSZip();
+      zip.file(file.name, file);
+      const baseName = file.name.split('.')[0];
+      zip.file(`${baseName}.srt`, srtContent);
+      
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(blob);
+      
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${baseName}_with_subtitles.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to create ZIP:', err);
+      setError('Failed to create ZIP file.');
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100 flex items-start space-x-3">
+        <AlertCircle className="w-5 h-5 text-indigo-500 shrink-0 mt-0.5" />
+        <div className="text-sm text-indigo-900">
+          <p className="font-semibold">How to use with Google Drive links:</p>
+          <ol className="list-decimal ml-4 mt-1 space-y-1">
+            <li>Download the media from your Google Drive link.</li>
+            <li>Upload the file below (max 20MB).</li>
+            <li>Choose to Transcribe (original language) or Translate to English.</li>
+          </ol>
+        </div>
+      </div>
+
+      {!file ? (
+        <div 
+          onClick={() => fileInputRef.current?.click()}
+          className="border-2 border-dashed border-zinc-300 rounded-2xl p-12 text-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/30 transition-all group"
+        >
+          <input 
+            type="file" 
+            ref={fileInputRef}
+            onChange={handleFileChange}
+            accept="video/*,audio/*"
+            className="hidden"
+          />
+          <Upload className="w-12 h-12 text-zinc-400 mx-auto mb-4 group-hover:text-indigo-500 transition-colors" />
+          <p className="text-zinc-600 font-medium">Click to upload or drag and drop</p>
+          <p className="text-zinc-400 text-sm mt-1">MP4, MOV, AVI, MP3, WAV (max 20MB)</p>
+        </div>
+      ) : (
+        <div className="space-y-6">
+          <div className="flex items-center justify-between bg-zinc-50 p-4 rounded-xl border border-zinc-100">
+            <div className="flex items-center space-x-3">
+              <div className="p-2 bg-indigo-100 rounded-lg">
+                {file.type.startsWith('audio/') ? (
+                  <FileAudio className="w-6 h-6 text-indigo-600" />
+                ) : (
+                  <FileVideo className="w-6 h-6 text-indigo-600" />
+                )}
+              </div>
+              <div>
+                <p className="text-sm font-medium text-zinc-900 truncate max-w-[200px] sm:max-w-md">
+                  {file.name}
+                </p>
+                <p className="text-xs text-zinc-500">
+                  {(file.size / (1024 * 1024)).toFixed(2)} MB
+                </p>
+              </div>
+            </div>
+            <button 
+              onClick={() => {
+                setFile(null);
+                onSharedFileChange(null);
+                setMediaPreview(null);
+                setSrtContent(null);
+                if (vttUrl) {
+                  URL.revokeObjectURL(vttUrl);
+                  setVttUrl(null);
+                }
+              }}
+              className="text-sm text-zinc-500 hover:text-red-500 font-medium"
+            >
+              Remove
+            </button>
+          </div>
+
+          {mediaPreview && (
+            <div className={`rounded-xl overflow-hidden bg-black border border-zinc-200 shadow-inner flex items-center justify-center ${file.type.startsWith('audio/') ? 'p-8' : 'aspect-video max-h-[360px]'}`}>
+              {file.type.startsWith('audio/') ? (
+                <audio 
+                  src={mediaPreview} 
+                  controls 
+                  className="w-full"
+                />
+              ) : (
+                <video 
+                  src={mediaPreview} 
+                  controls 
+                  className="w-full h-full object-contain"
+                >
+                  {vttUrl && (
+                    <track 
+                      src={vttUrl} 
+                      kind="subtitles" 
+                      srcLang="en" 
+                      label="Subtitles" 
+                      default 
+                    />
+                  )}
+                </video>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-col sm:flex-row justify-center gap-4">
+            <button
+              onClick={() => processMedia('translate')}
+              disabled={processingMode !== null}
+              className={`
+                flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-semibold transition-all
+                ${processingMode === 'translate' 
+                  ? 'bg-indigo-400 text-white cursor-not-allowed shadow-lg shadow-indigo-200' 
+                  : processingMode !== null
+                    ? 'bg-zinc-100 text-zinc-400 cursor-not-allowed'
+                    : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-200 active:scale-95'}
+              `}
+            >
+              {processingMode === 'translate' ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  <span>Translating...</span>
+                </>
+              ) : (
+                <>
+                  <Languages className="w-5 h-5" />
+                  <span>Translate to English</span>
+                </>
+              )}
+            </button>
+
+            <button
+              onClick={() => processMedia('transcribe')}
+              disabled={processingMode !== null}
+              className={`
+                flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-semibold transition-all
+                ${processingMode === 'transcribe' 
+                  ? 'bg-zinc-400 text-white cursor-not-allowed shadow-lg shadow-zinc-200' 
+                  : processingMode !== null
+                    ? 'bg-zinc-100 text-zinc-400 cursor-not-allowed'
+                    : 'bg-zinc-800 text-white hover:bg-zinc-900 shadow-lg shadow-zinc-200 active:scale-95'}
+              `}
+            >
+              {processingMode === 'transcribe' ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  <span>Transcribing...</span>
+                </>
+              ) : (
+                <>
+                  <FileText className="w-5 h-5" />
+                  <span>Transcribe Original</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <AnimatePresence>
+        {error && (
+          <motion.div 
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="p-4 bg-red-50 border border-red-100 rounded-xl flex items-start space-x-3"
+          >
+            <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+            <p className="text-sm text-red-700">{error}</p>
+          </motion.div>
+        )}
+
+        {srtContent && (
+          <motion.div 
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mt-8 space-y-4"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center space-x-2 text-emerald-600">
+                <CheckCircle2 className="w-5 h-5" />
+                <span className="font-semibold">SRT Generated Successfully</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <button 
+                  onClick={copyToClipboard}
+                  className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-zinc-100 hover:bg-zinc-200 text-zinc-700 transition-colors"
+                >
+                  {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copied ? 'Copied!' : 'Copy'}</span>
+                </button>
+                {file?.type.startsWith('video/') && (
+                  <button 
+                    onClick={downloadVideoWithSubs}
+                    disabled={isMuxing}
+                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-50 hover:bg-indigo-100 text-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isMuxing ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>{muxStatus || 'Encoding...'}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Film className="w-3.5 h-3.5" />
+                        <span>Encode Video</span>
+                      </>
+                    )}
+                  </button>
+                )}
+                {file?.type.startsWith('video/') && (
+                  <button 
+                    onClick={downloadZip}
+                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-50 hover:bg-indigo-100 text-indigo-700 transition-colors"
+                  >
+                    <FileArchive className="w-3.5 h-3.5" />
+                    <span>Download ZIP</span>
+                  </button>
+                )}
+                <button 
+                  onClick={downloadSRT}
+                  className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 hover:bg-indigo-700 text-white transition-colors shadow-sm"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download .srt</span>
+                </button>
+              </div>
+            </div>
+            <div className="srt-container max-h-[400px]">
+              <pre className="whitespace-pre-wrap">{srtContent}</pre>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}

@@ -5,7 +5,7 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 export type ProcessMode = 'translate' | 'transcribe';
 
 export async function generateSRT(fileBase64: string, mimeType: string, mode: ProcessMode = 'translate') {
-  const model = "gemini-3-flash-preview";
+  const model = "gemini-3.8-flash";
   
   const prompt = mode === 'translate' 
     ? `
@@ -32,10 +32,76 @@ export async function generateSRT(fileBase64: string, mimeType: string, mode: Pr
     },
   };
 
-  const response = await ai.models.generateContent({
-    model: model,
-    contents: { parts: [mediaPart, { text: prompt }] },
-  });
+  try {
+    const response = await ai.models.generateContent({
+      model: model,
+      contents: { parts: [mediaPart, { text: prompt }] },
+    });
+    return response.text;
+  } catch (err) {
+    // Fallback to gemini-3-flash-preview if alias differs
+    const fallbackResponse = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: { parts: [mediaPart, { text: prompt }] },
+    });
+    return fallbackResponse.text;
+  }
+}
 
-  return response.text;
+export async function generateSpeakerDiarization(fileBase64: string, mimeType: string): Promise<string> {
+  const instruction = `You are an advanced audio transcription and speaker diarization engine. Process the provided media input to detect, separate, and label distinct speakers (e.g., Speaker 1, Speaker 2) while generating synchronized subtitles with accurate start and end timestamps.
+
+Output the result strictly as a JSON array matching this structure:
+[
+  {
+    "speaker": "Speaker 1",
+    "start": "00:00:01,200",
+    "end": "00:00:04,500",
+    "text": "Spoken dialogue text here."
+  }
+]
+Do not wrap the JSON in markdown code blocks or conversational text`;
+
+  const mediaPart = {
+    inlineData: {
+      data: fileBase64,
+      mimeType: mimeType,
+    },
+  };
+
+  let responseText = "";
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3.8-flash",
+      contents: {
+        parts: [mediaPart, { text: instruction }],
+      },
+      config: {
+        systemInstruction: instruction,
+        responseMimeType: "application/json",
+      },
+    });
+    responseText = response.text || "";
+  } catch (err) {
+    // Fallback attempt
+    const fallbackResponse = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: {
+        parts: [mediaPart, { text: instruction }],
+      },
+      config: {
+        systemInstruction: instruction,
+        responseMimeType: "application/json",
+      },
+    });
+    responseText = fallbackResponse.text || "";
+  }
+
+  let text = responseText.trim();
+  if (text.startsWith("```json")) {
+    text = text.replace(/^```json\s*/i, "").replace(/\s*```$/, "").trim();
+  } else if (text.startsWith("```")) {
+    text = text.replace(/^```\s*/i, "").replace(/\s*```$/, "").trim();
+  }
+  return text;
 }
