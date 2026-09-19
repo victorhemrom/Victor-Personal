@@ -29,9 +29,12 @@ function getGeminiClient() {
 
 // Multi-tier model fallback for resilient audio transcription & processing
 const AUDIO_SUPPORTED_MODELS = [
+  "gemini-3.5-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
   "gemini-3.8-flash",
   "gemini-flash-latest",
-  "gemini-3.1-flash-lite",
 ];
 
 interface GenerateWithFallbackOptions {
@@ -74,19 +77,23 @@ async function generateContentWithRetryAndFallback(options: GenerateWithFallback
         console.warn(`[Gemini] ${model} attempt ${attempt + 1}/${maxRetries + 1} failed: ${errMessage}`);
 
         if (isDemandOrRateLimit) {
+          // If 503 / high demand, fail over immediately to the next healthy model
+          if (errStatus === 503 || errMessage.includes("503") || errMessage.includes("high demand") || errMessage.includes("UNAVAILABLE")) {
+            console.warn(`[Gemini] Model ${model} unavailable (503/high demand); immediately failing over to next model...`);
+            break;
+          }
+
           if (attempt < maxRetries) {
-            // Jittered backoff before retrying same model
-            const delayMs = 400 + Math.random() * 400;
+            // Jittered backoff before retrying rate limits
+            const delayMs = 300 + Math.random() * 300;
             await new Promise((r) => setTimeout(r, delayMs));
             continue;
           }
-          // Exhausted retries for this model, fallback to next model in list
-          console.warn(`[Gemini] Model ${model} under high demand; failing over to next model...`);
           break;
         } else {
-          // If error is not a transient capacity/rate issue, rethrow or try next model if 5xx
-          if (errStatus && typeof errStatus === "number" && errStatus >= 500) {
-            break; // try next model
+          // If error is a server error (5xx) or 404, try next model
+          if (errStatus && typeof errStatus === "number" && (errStatus >= 500 || errStatus === 404)) {
+            break;
           }
           throw err;
         }
